@@ -1,9 +1,10 @@
 import os
 from datetime import datetime
+from uuid import uuid4
 
-from flask import Flask, render_template_string, request
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, NoCredentialsError
+from flask import Flask, render_template_string, request
 
 app = Flask(__name__)
 
@@ -11,79 +12,146 @@ HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>E-Sawsaw S3 Test</title>
+    <meta charset="UTF-8">
+    <title>E-Sawsaw - Railway S3 Test</title>
     <style>
         body {
             font-family: Arial, sans-serif;
-            max-width: 600px;
+            max-width: 700px;
             margin: 40px auto;
             padding: 20px;
         }
 
+        h1 {
+            margin-bottom: 10px;
+        }
+
+        .box {
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            margin-top: 20px;
+        }
+
         .success {
-            color: green;
             background: #eaffea;
+            border: 1px solid #65b765;
             padding: 15px;
-            border-radius: 5px;
+            border-radius: 8px;
         }
 
         .error {
-            color: red;
             background: #ffeaea;
+            border: 1px solid #d9534f;
             padding: 15px;
-            border-radius: 5px;
+            border-radius: 8px;
         }
 
-        input[type=text] {
-            width: 100%;
-            padding: 8px;
-            margin: 8px 0;
-            box-sizing: border-box;
+        input[type=file] {
+            margin: 15px 0;
         }
 
         button {
             background: #0066cc;
             color: white;
-            padding: 10px 20px;
             border: none;
-            border-radius: 5px;
+            padding: 10px 18px;
+            border-radius: 6px;
             cursor: pointer;
         }
 
+        button:hover {
+            background: #0052a3;
+        }
+
+        img {
+            max-width: 100%;
+            margin-top: 15px;
+            border-radius: 8px;
+        }
+
         pre {
-            background: #f4f4f4;
-            padding: 10px;
-            border-radius: 5px;
-            word-wrap: break-word;
             white-space: pre-wrap;
+            word-break: break-word;
+            background: #f5f5f5;
+            padding: 12px;
+            border-radius: 6px;
         }
     </style>
 </head>
 
 <body>
 
-    <h1>E-Sawsaw — S3 Connectivity Test</h1>
+    <h1>E-Sawsaw</h1>
+    <p>Railway → Flask → AWS S3 image storage test</p>
 
-    <form method="POST">
-        <label>Test message to upload:</label>
-        <input
-            type="text"
-            name="message"
-            value="Hello from E-Sawsaw!"
-        >
+    <div class="box">
 
-        <br><br>
+        <form method="POST" enctype="multipart/form-data">
 
-        <button type="submit">Upload to S3</button>
-    </form>
+            <label>
+                <strong>Select a plate image:</strong>
+            </label>
+
+            <br>
+
+            <input
+                type="file"
+                name="plate_image"
+                accept="image/jpeg,image/png"
+                required
+            >
+
+            <br>
+
+            <button type="submit">
+                Upload Image to S3
+            </button>
+
+        </form>
+
+    </div>
 
     {% if result %}
-        <br>
 
-        <div class="{{ result.status }}">
-            <h3>{{ result.heading }}</h3>
-            <pre>{{ result.body }}</pre>
+        <div class="box">
+
+            {% if result.success %}
+
+                <div class="success">
+
+                    <h2>Upload Successful</h2>
+
+                    <pre>{{ result.message }}</pre>
+
+                    <p>
+                        <strong>Stored image:</strong>
+                    </p>
+
+                    <img src="{{ result.url }}" alt="Uploaded image">
+
+                    <p>
+                        <a href="{{ result.url }}" target="_blank">
+                            Open temporary S3 URL
+                        </a>
+                    </p>
+
+                </div>
+
+            {% else %}
+
+                <div class="error">
+
+                    <h2>Upload Failed</h2>
+
+                    <pre>{{ result.message }}</pre>
+
+                </div>
+
+            {% endif %}
+
         </div>
+
     {% endif %}
 
 </body>
@@ -91,39 +159,87 @@ HTML = """
 """
 
 
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+
+
 @app.route("/", methods=["GET", "POST"])
 def home():
+
     result = None
 
     if request.method == "POST":
-        message = request.form.get("message", "")
+
+        image_file = request.files.get("plate_image")
+
+        if not image_file or image_file.filename == "":
+            result = {
+                "success": False,
+                "message": "No image was selected."
+            }
+
+            return render_template_string(HTML, result=result)
+
+        # Only allow JPG and PNG for this test
+        allowed_types = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png"
+        }
+
+        if image_file.content_type not in allowed_types:
+            result = {
+                "success": False,
+                "message": (
+                    "Invalid image type.\n"
+                    "Please upload a JPG or PNG image."
+                )
+            }
+
+            return render_template_string(HTML, result=result)
 
         try:
+
+            # Read image directly into memory.
+            # Nothing is written to Railway's disk.
+            image_bytes = image_file.read()
+
+            if not image_bytes:
+                raise ValueError("The uploaded image is empty.")
+
             bucket = os.environ["S3_BUCKET_NAME"]
-
-            s3 = boto3.client("s3")
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            key = f"test/render_test_{timestamp}.txt"
-
-            content = (
-                "E-Sawsaw S3 test from Render\n"
-                f"Timestamp : {timestamp}\n"
-                f"Message   : {message}\n"
-                f"Bucket    : {bucket}\n"
-                f"Region    : {os.environ.get('AWS_DEFAULT_REGION', 'not set')}\n"
+            region = os.environ.get(
+                "AWS_DEFAULT_REGION",
+                "ap-southeast-1"
             )
 
-            # Upload test file to S3
+            s3 = boto3.client(
+                "s3",
+                region_name=region
+            )
+
+            # Generate a unique sample ID.
+            timestamp = datetime.utcnow().strftime(
+                "%Y%m%d_%H%M%S"
+            )
+
+            sample_id = (
+                f"sample_{timestamp}_{uuid4().hex[:8]}"
+            )
+
+            extension = allowed_types[image_file.content_type]
+
+            # E-Sawsaw's planned S3 structure
+            key = f"raw/{sample_id}{extension}"
+
+            # Upload directly from RAM to S3
             s3.put_object(
                 Bucket=bucket,
                 Key=key,
-                Body=content.encode("utf-8"),
-                ContentType="text/plain"
+                Body=image_bytes,
+                ContentType=image_file.content_type
             )
 
-            # Generate temporary download URL
+            # Generate temporary URL.
+            # The S3 object remains private.
             url = s3.generate_presigned_url(
                 "get_object",
                 Params={
@@ -134,42 +250,72 @@ def home():
             )
 
             result = {
-                "status": "success",
-                "heading": "SUCCESS — File uploaded to S3",
-                "body": (
-                    f"S3 Key     : {key}\n"
-                    f"Bucket     : {bucket}\n\n"
-                    f"Presigned URL (valid 5 min):\n{url}"
-                )
+                "success": True,
+                "message": (
+                    f"Sample ID : {sample_id}\n"
+                    f"S3 Bucket : {bucket}\n"
+                    f"S3 Key    : {key}\n"
+                    f"Size      : {len(image_bytes):,} bytes\n"
+                    f"Type      : {image_file.content_type}\n"
+                    f"Region    : {region}\n\n"
+                    "The image was uploaded directly from "
+                    "Railway memory to S3."
+                ),
+                "url": url
             }
 
         except KeyError as e:
+
             result = {
-                "status": "error",
-                "heading": "FAILED — Missing environment variable",
-                "body": (
-                    f"{e}\n\n"
-                    "Make sure you added all secrets in "
-                    "Render → Environment."
+                "success": False,
+                "message": (
+                    f"Missing Railway environment variable: {e}\n\n"
+                    "Check Railway → Variables."
+                )
+            }
+
+        except NoCredentialsError:
+
+            result = {
+                "success": False,
+                "message": (
+                    "AWS credentials were not found.\n\n"
+                    "Check these Railway variables:\n"
+                    "AWS_ACCESS_KEY_ID\n"
+                    "AWS_SECRET_ACCESS_KEY\n"
+                    "AWS_DEFAULT_REGION\n"
+                    "S3_BUCKET_NAME"
                 )
             }
 
         except ClientError as e:
+
             result = {
-                "status": "error",
-                "heading": "FAILED — AWS Error",
-                "body": str(e)
+                "success": False,
+                "message": (
+                    "AWS/S3 error:\n\n"
+                    f"{e}"
+                )
             }
 
         except Exception as e:
+
             result = {
-                "status": "error",
-                "heading": "FAILED — Unexpected error",
-                "body": str(e)
+                "success": False,
+                "message": (
+                    "Unexpected error:\n\n"
+                    f"{type(e).__name__}: {e}"
+                )
             }
 
-    return render_template_string(HTML, result=result)
+    return render_template_string(
+        HTML,
+        result=result
+    )
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 10000))
+    )
