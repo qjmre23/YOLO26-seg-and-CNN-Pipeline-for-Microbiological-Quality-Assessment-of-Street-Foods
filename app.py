@@ -8,22 +8,21 @@ from flask import Flask, render_template_string, request
 
 app = Flask(__name__)
 
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+
 HTML = """
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <title>E-Sawsaw - Railway S3 Test</title>
+
     <style>
         body {
             font-family: Arial, sans-serif;
             max-width: 700px;
             margin: 40px auto;
             padding: 20px;
-        }
-
-        h1 {
-            margin-bottom: 10px;
         }
 
         .box {
@@ -58,6 +57,7 @@ HTML = """
             padding: 10px 18px;
             border-radius: 6px;
             cursor: pointer;
+            font-size: 15px;
         }
 
         button:hover {
@@ -83,7 +83,10 @@ HTML = """
 <body>
 
     <h1>E-Sawsaw</h1>
-    <p>Railway → Flask → AWS S3 image storage test</p>
+
+    <p>
+        Railway → Flask → AWS S3 image storage test
+    </p>
 
     <div class="box">
 
@@ -120,18 +123,22 @@ HTML = """
 
                 <div class="success">
 
-                    <h2>Upload Successful</h2>
+                    <h2>✅ Upload Successful</h2>
 
                     <pre>{{ result.message }}</pre>
 
-                    <p>
-                        <strong>Stored image:</strong>
-                    </p>
+                    <h3>Stored Image</h3>
 
-                    <img src="{{ result.url }}" alt="Uploaded image">
+                    <img
+                        src="{{ result.url }}"
+                        alt="Uploaded image"
+                    >
 
                     <p>
-                        <a href="{{ result.url }}" target="_blank">
+                        <a
+                            href="{{ result.url }}"
+                            target="_blank"
+                        >
                             Open temporary S3 URL
                         </a>
                     </p>
@@ -142,7 +149,7 @@ HTML = """
 
                 <div class="error">
 
-                    <h2>Upload Failed</h2>
+                    <h2>❌ Upload Failed</h2>
 
                     <pre>{{ result.message }}</pre>
 
@@ -159,9 +166,6 @@ HTML = """
 """
 
 
-app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
-
-
 @app.route("/", methods=["GET", "POST"])
 def home():
 
@@ -171,66 +175,158 @@ def home():
 
         image_file = request.files.get("plate_image")
 
-        if not image_file or image_file.filename == "":
+        if not image_file or not image_file.filename:
+
             result = {
                 "success": False,
                 "message": "No image was selected."
             }
 
-            return render_template_string(HTML, result=result)
+            return render_template_string(
+                HTML,
+                result=result
+            )
 
-        # Only allow JPG and PNG for this test
         allowed_types = {
             "image/jpeg": ".jpg",
             "image/png": ".png"
         }
 
         if image_file.content_type not in allowed_types:
+
             result = {
                 "success": False,
                 "message": (
-                    "Invalid image type.\n"
-                    "Please upload a JPG or PNG image."
+                    "Only JPG and PNG images are allowed."
                 )
             }
 
-            return render_template_string(HTML, result=result)
+            return render_template_string(
+                HTML,
+                result=result
+            )
 
         try:
 
-            # Read image directly into memory.
-            # Nothing is written to Railway's disk.
+            # ==========================================
+            # READ RAILWAY ENVIRONMENT VARIABLES
+            # ==========================================
+
+            access_key = os.environ.get(
+                "AWS_ACCESS_KEY_ID"
+            )
+
+            secret_key = os.environ.get(
+                "AWS_SECRET_ACCESS_KEY"
+            )
+
+            region = os.environ.get(
+                "AWS_DEFAULT_REGION"
+            )
+
+            bucket = os.environ.get(
+                "S3_BUCKET_NAME"
+            )
+
+            # Check which variables are missing.
+            missing = []
+
+            if not access_key:
+                missing.append("AWS_ACCESS_KEY_ID")
+
+            if not secret_key:
+                missing.append("AWS_SECRET_ACCESS_KEY")
+
+            if not region:
+                missing.append("AWS_DEFAULT_REGION")
+
+            if not bucket:
+                missing.append("S3_BUCKET_NAME")
+
+            if missing:
+
+                raise RuntimeError(
+                    "Missing Railway environment variables:\n\n"
+                    + "\n".join(
+                        f"❌ {variable}"
+                        for variable in missing
+                    )
+                    + "\n\n"
+                    "Check Railway → your service → Variables."
+                )
+
+            # ==========================================
+            # DEBUG CHECK
+            # Does NOT print secret values.
+            # ==========================================
+
+            print("========== AWS ENV CHECK ==========")
+            print(
+                "AWS_ACCESS_KEY_ID:",
+                bool(access_key)
+            )
+            print(
+                "AWS_SECRET_ACCESS_KEY:",
+                bool(secret_key)
+            )
+            print(
+                "AWS_DEFAULT_REGION:",
+                region
+            )
+            print(
+                "S3_BUCKET_NAME:",
+                bucket
+            )
+            print("====================================")
+
+            # ==========================================
+            # READ IMAGE INTO MEMORY
+            # ==========================================
+
             image_bytes = image_file.read()
 
             if not image_bytes:
-                raise ValueError("The uploaded image is empty.")
 
-            bucket = os.environ["S3_BUCKET_NAME"]
-            region = os.environ.get(
-                "AWS_DEFAULT_REGION",
-                "ap-southeast-1"
-            )
+                raise RuntimeError(
+                    "The uploaded image is empty."
+                )
+
+            # ==========================================
+            # CREATE S3 CLIENT
+            # EXPLICITLY PASS AWS CREDENTIALS
+            # ==========================================
 
             s3 = boto3.client(
                 "s3",
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
                 region_name=region
             )
 
-            # Generate a unique sample ID.
+            # ==========================================
+            # CREATE UNIQUE SAMPLE ID
+            # ==========================================
+
             timestamp = datetime.utcnow().strftime(
                 "%Y%m%d_%H%M%S"
             )
 
             sample_id = (
-                f"sample_{timestamp}_{uuid4().hex[:8]}"
+                f"sample_{timestamp}_"
+                f"{uuid4().hex[:8]}"
             )
 
-            extension = allowed_types[image_file.content_type]
+            extension = allowed_types[
+                image_file.content_type
+            ]
 
-            # E-Sawsaw's planned S3 structure
+            # E-Sawsaw S3 structure
             key = f"raw/{sample_id}{extension}"
 
-            # Upload directly from RAM to S3
+            # ==========================================
+            # UPLOAD IMAGE TO S3
+            # ==========================================
+
             s3.put_object(
                 Bucket=bucket,
                 Key=key,
@@ -238,8 +334,10 @@ def home():
                 ContentType=image_file.content_type
             )
 
-            # Generate temporary URL.
-            # The S3 object remains private.
+            # ==========================================
+            # GENERATE TEMPORARY PRIVATE URL
+            # ==========================================
+
             url = s3.generate_presigned_url(
                 "get_object",
                 Params={
@@ -249,29 +347,35 @@ def home():
                 ExpiresIn=300
             )
 
+            # ==========================================
+            # SUCCESS
+            # ==========================================
+
             result = {
                 "success": True,
+
                 "message": (
                     f"Sample ID : {sample_id}\n"
                     f"S3 Bucket : {bucket}\n"
                     f"S3 Key    : {key}\n"
-                    f"Size      : {len(image_bytes):,} bytes\n"
-                    f"Type      : {image_file.content_type}\n"
+                    f"File Size : "
+                    f"{len(image_bytes):,} bytes\n"
+                    f"File Type : "
+                    f"{image_file.content_type}\n"
                     f"Region    : {region}\n\n"
-                    "The image was uploaded directly from "
-                    "Railway memory to S3."
+                    "SUCCESS!\n"
+                    "The image was uploaded directly "
+                    "from Railway memory to S3."
                 ),
+
                 "url": url
             }
 
-        except KeyError as e:
+        except RuntimeError as e:
 
             result = {
                 "success": False,
-                "message": (
-                    f"Missing Railway environment variable: {e}\n\n"
-                    "Check Railway → Variables."
-                )
+                "message": str(e)
             }
 
         except NoCredentialsError:
@@ -279,12 +383,11 @@ def home():
             result = {
                 "success": False,
                 "message": (
-                    "AWS credentials were not found.\n\n"
-                    "Check these Railway variables:\n"
-                    "AWS_ACCESS_KEY_ID\n"
-                    "AWS_SECRET_ACCESS_KEY\n"
-                    "AWS_DEFAULT_REGION\n"
-                    "S3_BUCKET_NAME"
+                    "Boto3 still cannot authenticate "
+                    "with AWS.\n\n"
+                    "The Railway variables were either "
+                    "not passed correctly or the AWS "
+                    "credentials are invalid."
                 )
             }
 
@@ -293,7 +396,7 @@ def home():
             result = {
                 "success": False,
                 "message": (
-                    "AWS/S3 error:\n\n"
+                    "AWS/S3 ERROR:\n\n"
                     f"{e}"
                 )
             }
@@ -303,8 +406,8 @@ def home():
             result = {
                 "success": False,
                 "message": (
-                    "Unexpected error:\n\n"
-                    f"{type(e).__name__}: {e}"
+                    f"{type(e).__name__}:\n\n"
+                    f"{e}"
                 )
             }
 
@@ -315,7 +418,10 @@ def home():
 
 
 if __name__ == "__main__":
+
     app.run(
         host="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000))
+        port=int(
+            os.environ.get("PORT", 10000)
+        )
     )
